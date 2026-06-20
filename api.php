@@ -420,10 +420,9 @@ switch ($action) {
                 $logPath = $progressDir . '/' . $downloadId . '_' . $index . '.log';
                 $cleanLabel = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $epLabel);
                 $cleanLabel = preg_replace('/\s+/', ' ', trim($cleanLabel));
-                $outputPath = $downloadsDir . '/' . $cleanLabel . '.%(ext)s';
 
                 $ps1Content .= "    # Episódio $index: $epLabel\n";
-                $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -o '" . $outputPath . "'" . $refererArg . " '" . $urlClean . "' 2>&1 | Out-File -FilePath '" . str_replace("'", "''", $logPath) . "' -Encoding utf8\n";
+                $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -P 'home:" . str_replace("'", "''", $downloadsDir) . "' -P 'temp:" . str_replace("'", "''", $progressDir) . "' -o '" . str_replace("'", "''", $cleanLabel) . ".%(ext)s'" . $refererArg . " '" . $urlClean . "' 2>&1 | Out-File -FilePath '" . str_replace("'", "''", $logPath) . "' -Encoding utf8\n";
 
                 $batchMeta['episodes'][] = [
                     'label' => $epLabel,
@@ -459,9 +458,9 @@ switch ($action) {
         if (!empty($customTitle)) {
             $cleanTitle = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $customTitle);
             $cleanTitle = preg_replace('/\s+/', ' ', trim($cleanTitle));
-            $outputPath = $downloadsDir . '/' . $cleanTitle . '.%(ext)s';
+            $outputFile = $cleanTitle . '.%(ext)s';
         } else {
-            $outputPath = $downloadsDir . '/%(title)s.%(ext)s';
+            $outputFile = '%(title)s.%(ext)s';
         }
 
         // Verifica se é uma URL do player netcinema e extrai o streaming/referer
@@ -480,7 +479,7 @@ switch ($action) {
 
         $ps1Content = "\$PID | Out-File -FilePath '" . str_replace("'", "''", $pidPath) . "' -Encoding ascii\n";
         $ps1Content .= "try {\n";
-        $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -o '" . $outputPath . "'" . $refererArg . " '" . $urlClean . "' 2>&1 | Out-File -FilePath '" . str_replace("'", "''", $logPath) . "' -Encoding utf8\n";
+        $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -P 'home:" . str_replace("'", "''", $downloadsDir) . "' -P 'temp:" . str_replace("'", "''", $progressDir) . "' -o '" . str_replace("'", "''", $outputFile) . "'" . $refererArg . " '" . $urlClean . "' 2>&1 | Out-File -FilePath '" . str_replace("'", "''", $logPath) . "' -Encoding utf8\n";
         $ps1Content .= "} finally {\n";
         $ps1Content .= "    if (Test-Path '" . str_replace("'", "''", $pidPath) . "') { Remove-Item '" . str_replace("'", "''", $pidPath) . "' }\n";
         $ps1Content .= "}\n";

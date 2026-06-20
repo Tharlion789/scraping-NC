@@ -415,6 +415,7 @@ switch ($action) {
         $downloadId = md5($url . $formatId . time());
 
         $logPath = $progressDir . '/' . $downloadId . '.log';
+        $metaPath = $progressDir . '/' . $downloadId . '.meta';
         $customTitle = $_POST['title'] ?? '';
         if (!empty($customTitle)) {
             $cleanTitle = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $customTitle);

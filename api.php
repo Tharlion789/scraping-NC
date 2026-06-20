@@ -1,10 +1,12 @@
 <?php
 // Configurações básicas
 set_time_limit(180); // limite de tempo alto para a análise inicial
-header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+if (php_sapi_name() !== 'cli') {
+    header('Content-Type: application/json');
+    header('Access-Control-Allow-Origin: *');
+    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type');
+}
 
 $pythonPath = "C:\\Users\\Tharlion\\anaconda3\\python.exe";
 $progressDir = __DIR__ . DIRECTORY_SEPARATOR . 'progress';
@@ -128,6 +130,17 @@ function extractStream($url) {
         'stream_url' => $streamUrl,
         'referer' => $effectiveHlsUrl
     ];
+}
+
+// Endpoint para execução via CLI (chamado pelo script PowerShell em segundo plano)
+if (php_sapi_name() === 'cli' || (isset($argv) && count($argv) > 0)) {
+    $cliAction = $argv[1] ?? '';
+    if ($cliAction === 'scrape_cli') {
+        $epUrl = $argv[2] ?? '';
+        $extracted = extractStream($epUrl);
+        echo $extracted ? json_encode($extracted) : json_encode(['error' => 'Failed to extract stream']);
+        exit;
+    }
 }
 
 // Helper para formatar bytes
@@ -373,6 +386,8 @@ switch ($action) {
         $formatIdClean = str_replace("'", "", $formatId);
         $pythonPathClean = str_replace("'", "", $pythonPath);
         $ffmpegBin = "C:/ffmpeg/bin";
+        $phpBin = PHP_BINARY;
+        $apiScript = __FILE__;
 
         // Download em Lote (Séries)
         if ($isBatch) {
@@ -387,7 +402,7 @@ switch ($action) {
             $pidPath = $progressDir . '/' . $downloadId . '.pid';
             $ps1Path = $progressDir . '/' . $downloadId . '.ps1';
 
-            // Monta o script PowerShell temporário de lote sequencial
+            // Monta o script PowerShell temporário de lote sequencial com extração on-demand
             $ps1Content = "\$PID | Out-File -FilePath '" . str_replace("'", "''", $pidPath) . "' -Encoding ascii\n";
             $ps1Content .= "try {\n";
 
@@ -406,23 +421,30 @@ switch ($action) {
                 $epUrl = $ep['url'];
                 $epLabel = $ep['label'];
                 
-                // Faz a raspagem dinâmica de cada episódio antes de incluir no script
-                $extracted = extractStream($epUrl);
-                if (!$extracted) {
-                    $streamUrl = $epUrl;
-                    $refererArg = "";
-                } else {
-                    $streamUrl = $extracted['stream_url'];
-                    $refererArg = " --add-header 'Referer: " . str_replace("'", "", $extracted['referer']) . "'";
-                }
-
-                $urlClean = str_replace("'", "", $streamUrl);
                 $logPath = $progressDir . '/' . $downloadId . '_' . $index . '.log';
                 $cleanLabel = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $epLabel);
                 $cleanLabel = preg_replace('/\s+/', ' ', trim($cleanLabel));
 
-                $ps1Content .= "    # Episódio $index: $epLabel\n";
-                $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -P 'home:" . str_replace("'", "''", $downloadsDir) . "' -P 'temp:" . str_replace("'", "''", $progressDir) . "' -o '" . str_replace("'", "''", $cleanLabel) . ".%(ext)s'" . $refererArg . " '" . $urlClean . "' 2>&1 | Out-File -FilePath '" . str_replace("'", "''", $logPath) . "' -Encoding utf8\n";
+                // Escapa caminhos para uso dentro das strings com aspas simples do PowerShell
+                $escapedEpUrl = str_replace("'", "''", $epUrl);
+                $escapedLogPath = str_replace("'", "''", $logPath);
+                $escapedCleanLabel = str_replace("'", "''", $cleanLabel);
+
+                $ps1Content .= "    # Episodio $index: $epLabel\n";
+                $ps1Content .= "    \$scrapeJson = & '" . str_replace("'", "''", $phpBin) . "' '" . str_replace("'", "''", $apiScript) . "' scrape_cli '" . $escapedEpUrl . "'\n";
+                $ps1Content .= "    \$scrape = \$null\n";
+                $ps1Content .= "    if (\$scrapeJson) {\n";
+                $ps1Content .= "        \$scrape = \$scrapeJson | ConvertFrom-Json -ErrorAction SilentlyContinue\n";
+                $ps1Content .= "    }\n";
+                $ps1Content .= "    \$urlClean = '" . $escapedEpUrl . "'\n";
+                $ps1Content .= "    \$refererArg = @()\n";
+                $ps1Content .= "    if (\$scrape -and \$scrape.stream_url) {\n";
+                $ps1Content .= "        \$urlClean = \$scrape.stream_url\n";
+                $ps1Content .= "        if (\$scrape.referer) {\n";
+                $ps1Content .= "            \$refererArg = @('--add-header', ('Referer: ' + \$scrape.referer))\n";
+                $ps1Content .= "        }\n";
+                $ps1Content .= "    }\n";
+                $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -P 'home:" . str_replace("'", "''", $downloadsDir) . "' -P 'temp:" . str_replace("'", "''", $progressDir) . "' -o '" . $escapedCleanLabel . ".%(ext)s' @refererArg \$urlClean 2>&1 | Out-File -FilePath '" . $escapedLogPath . "' -Encoding utf8\n\n";
 
                 $batchMeta['episodes'][] = [
                     'label' => $epLabel,

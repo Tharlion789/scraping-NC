@@ -520,6 +520,11 @@
                 const formData = new FormData();
                 formData.append('url', url);
                 formData.append('format_id', selectedFormat);
+                
+                const titleEl = document.getElementById('videoTitle');
+                if (titleEl && titleEl.innerText) {
+                    formData.append('title', titleEl.innerText.trim());
+                }
 
                 if (isSeriesMode) {
                     const checkboxes = document.querySelectorAll('.episode-checkbox:checked');

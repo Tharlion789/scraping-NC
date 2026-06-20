@@ -210,6 +210,38 @@ switch ($action) {
             exit;
         }
 
+        $pageTitle = null;
+        if (strpos($url, 'eee1.lat') !== false || strpos($url, 'netcinema.lat') !== false) {
+            $isPlayerPage = (strpos($url, 'media-player/') !== false || strpos($url, 'hls.php') !== false || strpos($url, 'hlsarchive.php') !== false);
+            if (!$isPlayerPage) {
+                $ch = curl_init();
+                curl_setopt($ch, CURLOPT_URL, $url);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+                $html = curl_exec($ch);
+                curl_close($ch);
+                
+                if (!empty($html)) {
+                    if (preg_match('/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i', $html, $ogTitleMatches)) {
+                        $pageTitle = htmlspecialchars_decode(trim($ogTitleMatches[1]));
+                    }
+                    if (empty($pageTitle) && preg_match('/<title>(.*?)<\/title>/is', $html, $titleMatches)) {
+                        $rawTitle = trim($titleMatches[1]);
+                        $rawTitle = preg_replace('/\s*-\s*NetCine.*/i', '', $rawTitle);
+                        $rawTitle = preg_replace('/Assistir\s+/i', '', $rawTitle);
+                        $rawTitle = preg_replace('/\s+Online\s+Grátis.*/i', '', $rawTitle);
+                        $pageTitle = htmlspecialchars_decode($rawTitle);
+                    }
+                    if (empty($pageTitle) && preg_match('/<h1[^>]*>(.*?)<\/h1>/is', $html, $h1Matches)) {
+                        $pageTitle = strip_tags(trim($h1Matches[1]));
+                    }
+                }
+            }
+        }
+
         // Verifica se é uma URL do player netcinema e raspa o stream final
         $extracted = extractStream($url);
         $refererArg = "";
@@ -235,7 +267,7 @@ switch ($action) {
 
         // Monta os metadados do vídeo
         $info = [
-            'title' => $data['title'] ?? ($data['fulltitle'] ?? 'Vídeo sem título'),
+            'title' => !empty($pageTitle) ? $pageTitle : ($data['title'] ?? ($data['fulltitle'] ?? 'Vídeo sem título')),
             'duration' => isset($data['duration']) ? gmdate($data['duration'] >= 3600 ? "H:i:s" : "i:s", $data['duration']) : 'Desconhecida',
             'thumbnail' => $data['thumbnail'] ?? ($data['thumbnails'][0]['url'] ?? ''),
             'formats' => []
@@ -347,7 +379,8 @@ switch ($action) {
 
                 $urlClean = str_replace("'", "", $streamUrl);
                 $logPath = $progressDir . '/' . $downloadId . '_' . $index . '.log';
-                $cleanLabel = preg_replace('/[^a-zA-Z0-9_\-\s]/', '', $epLabel);
+                $cleanLabel = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $epLabel);
+                $cleanLabel = preg_replace('/\s+/', ' ', trim($cleanLabel));
                 $outputPath = $downloadsDir . '/' . $cleanLabel . ' [%(id)s].%(ext)s';
 
                 $ps1Content .= "    # Episódio $index: $epLabel\n";
@@ -382,8 +415,14 @@ switch ($action) {
         $downloadId = md5($url . $formatId . time());
 
         $logPath = $progressDir . '/' . $downloadId . '.log';
-        $metaPath = $progressDir . '/' . $downloadId . '.meta';
-        $outputPath = $downloadsDir . '/%(title)s [%(id)s].%(ext)s';
+        $customTitle = $_POST['title'] ?? '';
+        if (!empty($customTitle)) {
+            $cleanTitle = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $customTitle);
+            $cleanTitle = preg_replace('/\s+/', ' ', trim($cleanTitle));
+            $outputPath = $downloadsDir . '/' . $cleanTitle . ' [%(id)s].%(ext)s';
+        } else {
+            $outputPath = $downloadsDir . '/%(title)s [%(id)s].%(ext)s';
+        }
 
         // Verifica se é uma URL do player netcinema e extrai o streaming/referer
         $extracted = extractStream($url);

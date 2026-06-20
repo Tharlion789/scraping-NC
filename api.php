@@ -439,7 +439,7 @@ switch ($action) {
             $ps1Content .= "    if (Test-Path '" . str_replace("'", "''", $pidPath) . "') { Remove-Item '" . str_replace("'", "''", $pidPath) . "' }\n";
             $ps1Content .= "}\n";
 
-            file_put_contents($ps1Path, $ps1Content);
+            file_put_contents($ps1Path, "\xEF\xBB\xBF" . $ps1Content);
             file_put_contents($metaPath, json_encode($batchMeta, JSON_PRETTY_PRINT));
 
             // Executa o script .ps1 em segundo plano de forma síncrona/sequencial interna
@@ -484,7 +484,7 @@ switch ($action) {
         $ps1Content .= "} finally {\n";
         $ps1Content .= "    if (Test-Path '" . str_replace("'", "''", $pidPath) . "') { Remove-Item '" . str_replace("'", "''", $pidPath) . "' }\n";
         $ps1Content .= "}\n";
-        file_put_contents($ps1Path, $ps1Content);
+        file_put_contents($ps1Path, "\xEF\xBB\xBF" . $ps1Content);
 
         // Executa o script .ps1 em segundo plano
         $winCmd = 'start "downloader_' . $downloadId . '" /B powershell -NoProfile -ExecutionPolicy Bypass -File "' . $ps1Path . '"';

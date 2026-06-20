@@ -196,6 +196,42 @@ function cleanMovieTitle($title) {
     return $title;
 }
 
+// Helper para localizar o executável php.exe de forma resiliente (mesmo rodando sob Apache module)
+function getPhpExecutable() {
+    $phpPath = PHP_BINARY;
+    
+    // Se o caminho terminar com php.exe ou php-cgi.exe, está correto (CGI ou CLI direto)
+    $basename = strtolower(basename($phpPath));
+    if ($basename === 'php.exe' || $basename === 'php-cgi.exe') {
+        return $phpPath;
+    }
+    
+    // Se rodando sob módulo do Apache (httpd.exe), deduzimos no XAMPP:
+    // C:\xampp\apache\bin\httpd.exe -> C:\xampp\php\php.exe
+    $apacheDir = dirname(dirname($phpPath));
+    $xamppDir = dirname($apacheDir);
+    $xamppPhp = $xamppDir . DIRECTORY_SEPARATOR . 'php' . DIRECTORY_SEPARATOR . 'php.exe';
+    
+    if (file_exists($xamppPhp)) {
+        return $xamppPhp;
+    }
+    
+    // Caminhos padrões adicionais no Windows
+    $commonPaths = [
+        'C:\\xampp\\php\\php.exe',
+        'C:\\Program Files\\PHP\\php.exe',
+        'C:\\Program Files (x86)\\PHP\\php.exe'
+    ];
+    
+    foreach ($commonPaths as $path) {
+        if (file_exists($path)) {
+            return $path;
+        }
+    }
+    
+    return 'php';
+}
+
 // Ações da API
 $action = $_GET['action'] ?? '';
 
@@ -386,7 +422,7 @@ switch ($action) {
         $formatIdClean = str_replace("'", "", $formatId);
         $pythonPathClean = str_replace("'", "", $pythonPath);
         $ffmpegBin = "C:/ffmpeg/bin";
-        $phpBin = PHP_BINARY;
+        $phpBin = getPhpExecutable();
         $apiScript = __FILE__;
 
         // Download em Lote (Séries)

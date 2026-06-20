@@ -140,6 +140,49 @@ function formatBytes($bytes, $precision = 2) {
     return round($bytes, $precision) . ' ' . $units[$pow];
 }
 
+// Helper para limpar o título do filme (removendo propagandas e corrigindo codificação corrompida)
+function cleanMovieTitle($title) {
+    // Dicionário para corrigir caracteres corrompidos comuns em UTF-8 (double encoding)
+    $utf8_chars = [
+        'Ã¡' => 'á', 'Ã¢' => 'â', 'Ã£' => 'ã', 'Ã©' => 'é', 'Ãª' => 'ê', 
+        'Ã' . "\xad" => 'í', 'Ãad' => 'í', 'Ã³' => 'ó', 'Ã´' => 'ô', 'Ãµ' => 'õ', 
+        'Ãº' => 'ú', 'Ã§' => 'ç', 'Ã ' => 'à',
+        'Ã' => 'Á', 'Ã' => 'Â', 'Ã' => 'Ã', 'Ã' => 'É', 'Ã' => 'Ê', 
+        'Ã' => 'Í', 'Ã' => 'Ó', 'Ã' => 'Ô', 'ÃÕ' => 'Õ', 'Ã' => 'Ú', 
+        'Ã' => 'Ç', 'Ã' => 'À'
+    ];
+    $title = strtr($title, $utf8_chars);
+
+    // Decodifica entidades HTML
+    $title = htmlspecialchars_decode($title, ENT_QUOTES | ENT_HTML5);
+    
+    // Remove "Assistir " do início
+    $title = preg_replace('/^Assistir\s+/ui', '', $title);
+    
+    // Lista de padrões de sufixo a remover
+    $suffixes = [
+        '/\s*-\s*NetCine.*/ui',
+        '/\s*-\s*Net\s*Cinema.*/ui',
+        '/\s*Online\s+em\s+HD\s+no\s+NetCine.*/ui',
+        '/\s*Online\s+em\s+HD\s+no\s+NetCinema.*/ui',
+        '/\s*Online\s+Grátis\s+no\s+NetCine.*/ui',
+        '/\s*Online\s+Grátis\s+no\s+NetCinema.*/ui',
+        '/\s*Online\s+Grátis.*/ui',
+        '/\s*Online\s+em\s+HD.*/ui',
+        '/\s*Dublado\s+Online.*/ui',
+        '/\s*Legendado\s+Online.*/ui'
+    ];
+    
+    foreach ($suffixes as $pattern) {
+        $title = preg_replace($pattern, '', $title);
+    }
+    
+    // Limpa múltiplos espaços
+    $title = preg_replace('/\s+/', ' ', trim($title));
+    
+    return $title;
+}
+
 // Ações da API
 $action = $_GET['action'] ?? '';
 
@@ -171,7 +214,7 @@ switch ($action) {
 
             // Extrai Título
             preg_match('/<h1[^>]*>(.*?)<\/h1>/is', $html, $h1Title);
-            $title = isset($h1Title[1]) ? strip_tags(trim($h1Title[1])) : 'Série sem título';
+            $title = isset($h1Title[1]) ? cleanMovieTitle(strip_tags(trim($h1Title[1]))) : 'Série sem título';
 
             // Extrai Thumbnail
             preg_match('/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i', $html, $ogImage);
@@ -226,17 +269,13 @@ switch ($action) {
                 
                 if (!empty($html)) {
                     if (preg_match('/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i', $html, $ogTitleMatches)) {
-                        $pageTitle = htmlspecialchars_decode(trim($ogTitleMatches[1]));
+                        $pageTitle = cleanMovieTitle($ogTitleMatches[1]);
                     }
                     if (empty($pageTitle) && preg_match('/<title>(.*?)<\/title>/is', $html, $titleMatches)) {
-                        $rawTitle = trim($titleMatches[1]);
-                        $rawTitle = preg_replace('/\s*-\s*NetCine.*/i', '', $rawTitle);
-                        $rawTitle = preg_replace('/Assistir\s+/i', '', $rawTitle);
-                        $rawTitle = preg_replace('/\s+Online\s+Grátis.*/i', '', $rawTitle);
-                        $pageTitle = htmlspecialchars_decode($rawTitle);
+                        $pageTitle = cleanMovieTitle($titleMatches[1]);
                     }
                     if (empty($pageTitle) && preg_match('/<h1[^>]*>(.*?)<\/h1>/is', $html, $h1Matches)) {
-                        $pageTitle = strip_tags(trim($h1Matches[1]));
+                        $pageTitle = cleanMovieTitle(strip_tags($h1Matches[1]));
                     }
                 }
             }
@@ -267,7 +306,7 @@ switch ($action) {
 
         // Monta os metadados do vídeo
         $info = [
-            'title' => !empty($pageTitle) ? $pageTitle : ($data['title'] ?? ($data['fulltitle'] ?? 'Vídeo sem título')),
+            'title' => !empty($pageTitle) ? $pageTitle : cleanMovieTitle($data['title'] ?? ($data['fulltitle'] ?? 'Vídeo sem título')),
             'duration' => isset($data['duration']) ? gmdate($data['duration'] >= 3600 ? "H:i:s" : "i:s", $data['duration']) : 'Desconhecida',
             'thumbnail' => $data['thumbnail'] ?? ($data['thumbnails'][0]['url'] ?? ''),
             'formats' => []
@@ -381,7 +420,7 @@ switch ($action) {
                 $logPath = $progressDir . '/' . $downloadId . '_' . $index . '.log';
                 $cleanLabel = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $epLabel);
                 $cleanLabel = preg_replace('/\s+/', ' ', trim($cleanLabel));
-                $outputPath = $downloadsDir . '/' . $cleanLabel . ' [%(id)s].%(ext)s';
+                $outputPath = $downloadsDir . '/' . $cleanLabel . '.%(ext)s';
 
                 $ps1Content .= "    # Episódio $index: $epLabel\n";
                 $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -o '" . $outputPath . "'" . $refererArg . " '" . $urlClean . "' 2>&1 | Out-File -FilePath '" . str_replace("'", "''", $logPath) . "' -Encoding utf8\n";
@@ -420,9 +459,9 @@ switch ($action) {
         if (!empty($customTitle)) {
             $cleanTitle = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $customTitle);
             $cleanTitle = preg_replace('/\s+/', ' ', trim($cleanTitle));
-            $outputPath = $downloadsDir . '/' . $cleanTitle . ' [%(id)s].%(ext)s';
+            $outputPath = $downloadsDir . '/' . $cleanTitle . '.%(ext)s';
         } else {
-            $outputPath = $downloadsDir . '/%(title)s [%(id)s].%(ext)s';
+            $outputPath = $downloadsDir . '/%(title)s.%(ext)s';
         }
 
         // Verifica se é uma URL do player netcinema e extrai o streaming/referer

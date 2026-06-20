@@ -265,7 +265,24 @@
         document.addEventListener('DOMContentLoaded', () => {
             loadLibrary();
             updateStorageWidget();
+            checkActiveDownload();
         });
+
+        // Verifica se há algum download ativo rodando no background e restaura o monitoramento
+        async function checkActiveDownload() {
+            try {
+                const response = await fetch('api.php?action=get_active');
+                const data = await response.json();
+                
+                if (data.active_id) {
+                    activeDownloadId = data.active_id;
+                    document.getElementById('downloadProgressCard').style.display = 'block';
+                    startPollingProgress();
+                }
+            } catch (e) {
+                console.error("Erro ao verificar download ativo:", e);
+            }
+        }
 
         // Helper para gerar gradientes elegantes e únicos com base no nome do filme
         function getGradientForTitle(title) {

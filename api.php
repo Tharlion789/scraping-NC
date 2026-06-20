@@ -708,6 +708,28 @@ switch ($action) {
 
         echo json_encode(['success' => true]);
         break;
+    case 'get_active':
+        $activeId = null;
+        if (file_exists($progressDir)) {
+            $dir = new DirectoryIterator($progressDir);
+            foreach ($dir as $fileinfo) {
+                if (!$fileinfo->isDot() && $fileinfo->isFile() && $fileinfo->getExtension() === 'pid') {
+                    $pidFile = $fileinfo->getFilename();
+                    $id = pathinfo($pidFile, PATHINFO_FILENAME);
+                    
+                    $pid = trim(file_get_contents($fileinfo->getPathname()));
+                    if (!empty($pid) && is_numeric($pid)) {
+                        $taskCheck = shell_exec('tasklist /FI "PID eq ' . $pid . '" /NH');
+                        if ($taskCheck && strpos($taskCheck, $pid) !== false) {
+                            $activeId = $id;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        echo json_encode(['active_id' => $activeId]);
+        break;
 
     case 'get_config':
         $freeSpace = @disk_free_space($downloadsDir);

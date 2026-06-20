@@ -151,6 +151,65 @@ switch ($action) {
             exit;
         }
 
+        // Verifica se é uma URL de série no NetCinema
+        $isSeriesPage = (strpos($url, '/tvshows/') !== false);
+        if ($isSeriesPage) {
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+            $html = curl_exec($ch);
+            curl_close($ch);
+
+            if (empty($html)) {
+                echo json_encode(['error' => 'Não foi possível acessar a página da série.']);
+                exit;
+            }
+
+            // Extrai Título
+            preg_match('/<h1[^>]*>(.*?)<\/h1>/is', $html, $h1Title);
+            $title = isset($h1Title[1]) ? strip_tags(trim($h1Title[1])) : 'Série sem título';
+
+            // Extrai Thumbnail
+            preg_match('/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i', $html, $ogImage);
+            $thumbnail = $ogImage[1] ?? '';
+
+            // Extrai Episódios usando regex em todo o HTML
+            preg_match_all('/<a[^>]+href="([^"]+episode\/[^"]+)"[^>]*>(.*?)<\/a>/is', $html, $matches, PREG_SET_ORDER);
+            
+            $episodes = [];
+            $seenUrls = [];
+            foreach ($matches as $match) {
+                $epUrl = htmlspecialchars_decode($match[1]);
+                if (in_array($epUrl, $seenUrls)) continue;
+                $seenUrls[] = $epUrl;
+                
+                $label = strip_tags(trim($match[2]));
+                $label = preg_replace('/\s+/', ' ', $label);
+                
+                $episodes[] = [
+                    'url' => $epUrl,
+                    'label' => $label
+                ];
+            }
+            
+            if (empty($episodes)) {
+                echo json_encode(['error' => 'Nenhum episódio encontrado nesta série.']);
+                exit;
+            }
+
+            echo json_encode([
+                'is_series' => true,
+                'title' => $title,
+                'thumbnail' => $thumbnail,
+                'episodes' => $episodes
+            ]);
+            exit;
+        }
+
         // Verifica se é uma URL do player netcinema e raspa o stream final
         $extracted = extractStream($url);
         $refererArg = "";
@@ -233,18 +292,98 @@ switch ($action) {
     case 'download':
         $url = $_POST['url'] ?? '';
         $formatId = $_POST['format_id'] ?? '';
+        $isBatch = (($_POST['is_batch'] ?? '') === 'true');
 
         if (empty($url) || $formatId === '') {
             echo json_encode(['error' => 'URL e ID do formato são obrigatórios.']);
             exit;
         }
 
-        // Identificador único para este download
+        $formatIdClean = str_replace("'", "", $formatId);
+        $pythonPathClean = str_replace("'", "", $pythonPath);
+        $ffmpegBin = "C:/ffmpeg/bin";
+
+        // Download em Lote (Séries)
+        if ($isBatch) {
+            $episodesData = json_decode($_POST['batch_episodes'] ?? '[]', true);
+            if (empty($episodesData)) {
+                echo json_encode(['error' => 'Nenhum episódio fornecido para o download em lote.']);
+                exit;
+            }
+
+            $downloadId = md5(serialize($episodesData) . time());
+            $metaPath = $progressDir . '/' . $downloadId . '.meta';
+            $pidPath = $progressDir . '/' . $downloadId . '.pid';
+            $ps1Path = $progressDir . '/' . $downloadId . '.ps1';
+
+            // Monta o script PowerShell temporário de lote sequencial
+            $ps1Content = "\$PID | Out-File -FilePath '" . str_replace("'", "''", $pidPath) . "' -Encoding ascii\n";
+            $ps1Content .= "try {\n";
+
+            $batchMeta = [
+                'id' => $downloadId,
+                'status' => 'downloading',
+                'is_batch' => true,
+                'start_time' => time(),
+                'current_index' => 0,
+                'total_episodes' => count($episodesData),
+                'episodes' => []
+            ];
+
+            $index = 0;
+            foreach ($episodesData as $ep) {
+                $epUrl = $ep['url'];
+                $epLabel = $ep['label'];
+                
+                // Faz a raspagem dinâmica de cada episódio antes de incluir no script
+                $extracted = extractStream($epUrl);
+                if (!$extracted) {
+                    $streamUrl = $epUrl;
+                    $refererArg = "";
+                } else {
+                    $streamUrl = $extracted['stream_url'];
+                    $refererArg = " --add-header 'Referer: " . str_replace("'", "", $extracted['referer']) . "'";
+                }
+
+                $urlClean = str_replace("'", "", $streamUrl);
+                $logPath = $progressDir . '/' . $downloadId . '_' . $index . '.log';
+                $cleanLabel = preg_replace('/[^a-zA-Z0-9_\-\s]/', '', $epLabel);
+                $outputPath = $downloadsDir . '/' . $cleanLabel . ' [%(id)s].%(ext)s';
+
+                $ps1Content .= "    # Episódio $index: $epLabel\n";
+                $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -o '" . $outputPath . "'" . $refererArg . " '" . $urlClean . "' 2>&1 | Out-File -FilePath '" . str_replace("'", "''", $logPath) . "' -Encoding utf8\n";
+
+                $batchMeta['episodes'][] = [
+                    'label' => $epLabel,
+                    'url' => $epUrl,
+                    'log_path' => $logPath,
+                    'status' => 'pending',
+                    'progress' => 0
+                ];
+                $index++;
+            }
+
+            $ps1Content .= "} finally {\n";
+            $ps1Content .= "    if (Test-Path '" . str_replace("'", "''", $pidPath) . "') { Remove-Item '" . str_replace("'", "''", $pidPath) . "' }\n";
+            $ps1Content .= "}\n";
+
+            file_put_contents($ps1Path, $ps1Content);
+            file_put_contents($metaPath, json_encode($batchMeta, JSON_PRETTY_PRINT));
+
+            // Executa o script .ps1 em segundo plano de forma síncrona/sequencial interna
+            $winCmd = 'start "downloader_' . $downloadId . '" /B powershell -NoProfile -ExecutionPolicy Bypass -File "' . $ps1Path . '"';
+            pclose(popen($winCmd, "r"));
+
+            echo json_encode(['success' => true, 'id' => $downloadId]);
+            break;
+        }
+
+        // Download Individual (Filmes / Vídeos OK.ru)
         $downloadId = md5($url . $formatId . time());
 
         $logPath = $progressDir . '/' . $downloadId . '.log';
         $metaPath = $progressDir . '/' . $downloadId . '.meta';
-        $outputPath = $downloadsDir . '/%(title)s [%(id)s].%(ext)s'; // Nota: Sem duplicar % pois rodará de dentro do arquivo .ps1
+        $outputPath = $downloadsDir . '/%(title)s [%(id)s].%(ext)s';
 
         // Verifica se é uma URL do player netcinema e extrai o streaming/referer
         $extracted = extractStream($url);
@@ -254,13 +393,9 @@ switch ($action) {
             $refererArg = " --add-header 'Referer: " . str_replace("'", "", $extracted['referer']) . "'";
         }
 
-        // Higieniza os parâmetros de URL e formato para evitar injeção de comandos
         $urlClean = str_replace("'", "", $url);
-        $formatIdClean = str_replace("'", "", $formatId);
-        $pythonPathClean = str_replace("'", "", $pythonPath);
-        $ffmpegBin = "C:/ffmpeg/bin";
 
-        // Monta o script PowerShell temporário para evitar QUALQUER tipo de bug de aspas/redirecionamento/escaping
+        // Monta o script PowerShell temporário individual
         $ps1Path = $progressDir . '/' . $downloadId . '.ps1';
         $pidPath = $progressDir . '/' . $downloadId . '.pid';
 
@@ -272,7 +407,7 @@ switch ($action) {
         $ps1Content .= "}\n";
         file_put_contents($ps1Path, $ps1Content);
 
-        // Executa o script .ps1 em segundo plano no Windows de forma limpa
+        // Executa o script .ps1 em segundo plano
         $winCmd = 'start "downloader_' . $downloadId . '" /B powershell -NoProfile -ExecutionPolicy Bypass -File "' . $ps1Path . '"';
         pclose(popen($winCmd, "r"));
 
@@ -295,21 +430,10 @@ switch ($action) {
             exit;
         }
 
-        $logPath = $progressDir . DIRECTORY_SEPARATOR . $id . '.log';
         $metaPath = $progressDir . DIRECTORY_SEPARATOR . $id . '.meta';
-
-        if (!file_exists($logPath)) {
-            echo json_encode(['status' => 'waiting', 'progress' => 0]);
-            exit;
-        }
-
-        $log = file_get_contents($logPath);
-        if (substr($log, 0, 2) === "\xFF\xFE" || strpos($log, "\x00") !== false) {
-            $log = mb_convert_encoding($log, 'UTF-8', 'UTF-16LE');
-        }
-
-        // Verifica se o processo está em execução no Windows via PID
         $pidPath = $progressDir . DIRECTORY_SEPARATOR . $id . '.pid';
+
+        // Verifica se o processo principal está ativo via PID
         $isRunning = false;
         if (file_exists($pidPath)) {
             $pid = trim(file_get_contents($pidPath));
@@ -321,15 +445,166 @@ switch ($action) {
             }
         }
 
-        // Processa as linhas do log para extrair progresso
+        // Se o metadados existir, verificamos se é download em lote
+        if (file_exists($metaPath)) {
+            $meta = json_decode(file_get_contents($metaPath), true);
+            
+            if (!empty($meta['is_batch'])) {
+                $totalEps = $meta['total_episodes'];
+                
+                // Determina qual é o episódio ativo varrendo a existência de arquivos de log
+                $activeIdx = 0;
+                for ($i = 0; $i < $totalEps; $i++) {
+                    $logFile = $progressDir . DIRECTORY_SEPARATOR . $id . '_' . $i . '.log';
+                    if (file_exists($logFile)) {
+                        $activeIdx = $i;
+                    }
+                }
+                
+                $meta['current_index'] = $activeIdx;
+                $currentIdx = $activeIdx;
+                
+                $logFileActive = $progressDir . DIRECTORY_SEPARATOR . $id . '_' . $currentIdx . '.log';
+                
+                $percent = 0;
+                $speed = '';
+                $eta = '';
+                $totalSize = 'Calculando...';
+                $destinationFile = '';
+                $log = '';
+                
+                if (file_exists($logFileActive)) {
+                    $log = file_get_contents($logFileActive);
+                    if (substr($log, 0, 2) === "\xFF\xFE" || strpos($log, "\x00") !== false) {
+                        $log = mb_convert_encoding($log, 'UTF-8', 'UTF-16LE');
+                    }
+                    
+                    // Faz o parsing do log do episódio ativo
+                    $lines = explode("\n", $log);
+                    foreach ($lines as $line) {
+                        if (preg_match('/\[download\] Destination: (.*)/', $line, $destMatches)) {
+                            $destinationFile = basename(trim($destMatches[1]));
+                        } elseif (preg_match('/\[download\] (.*) has already been downloaded/', $line, $destMatches)) {
+                            $destinationFile = basename(trim($destMatches[1]));
+                            $percent = 100;
+                        }
+                    }
+                    
+                    for ($i = count($lines) - 1; $i >= 0; $i--) {
+                        $line = trim($lines[$i]);
+                        if (empty($line)) continue;
+                        if (preg_match('/\[download\]\s+([0-9.]+)%\s+of\s+(~?\s*[0-9a-zA-Z.]+)\s+at\s+([0-9a-zA-Z.\/s]+)\s+ETA\s+([0-9a-zA-Z.:]+)/', $line, $m)) {
+                            $percent = floatval($m[1]);
+                            $totalSize = trim($m[2]);
+                            $speed = trim($m[3]);
+                            $eta = trim($m[4]);
+                            break;
+                        } elseif (preg_match('/\[download\]\s+([0-9.]+)%\s+of\s+(~?\s*[0-9a-zA-Z.]+)/', $line, $m)) {
+                            $percent = floatval($m[1]);
+                            $totalSize = trim($m[2]);
+                            break;
+                        }
+                    }
+                }
+                
+                // Atualiza status e progresso dos episódios
+                $meta['episodes'][$currentIdx]['progress'] = $percent;
+                
+                for ($i = 0; $i < $totalEps; $i++) {
+                    if ($i < $currentIdx) {
+                        $meta['episodes'][$i]['status'] = 'completed';
+                        $meta['episodes'][$i]['progress'] = 100;
+                    } elseif ($i == $currentIdx) {
+                        if ($percent >= 100 || (!empty($log) && (stripos($log, '100% of') !== false || stripos($log, 'has already been downloaded') !== false))) {
+                            $meta['episodes'][$i]['status'] = 'completed';
+                            $meta['episodes'][$i]['progress'] = 100;
+                        } else {
+                            $meta['episodes'][$i]['status'] = 'downloading';
+                        }
+                    } else {
+                        $meta['episodes'][$i]['status'] = 'pending';
+                        $meta['episodes'][$i]['progress'] = 0;
+                    }
+                }
+                
+                // Determina status geral do lote
+                $status = 'downloading';
+                $errorMessage = null;
+                
+                $allCompleted = true;
+                foreach ($meta['episodes'] as $ep) {
+                    if ($ep['status'] !== 'completed') {
+                        $allCompleted = false;
+                    }
+                }
+                
+                if ($allCompleted) {
+                    $status = 'completed';
+                } elseif (!$isRunning) {
+                    if (!empty($log) && stripos($log, 'ERROR:') !== false) {
+                        preg_match('/ERROR:\s*(.*)/i', $log, $errMatches);
+                        $errMsg = $errMatches[1] ?? 'Erro desconhecido no lote.';
+                        $status = 'error';
+                        $errorMessage = trim($errMsg);
+                        $meta['episodes'][$currentIdx]['status'] = 'failed';
+                    } else {
+                        $status = 'failed';
+                        $meta['episodes'][$currentIdx]['status'] = 'failed';
+                    }
+                }
+                
+                $meta['status'] = $status;
+                file_put_contents($metaPath, json_encode($meta, JSON_PRETTY_PRINT));
+                
+                $totalProgressSum = 0;
+                foreach ($meta['episodes'] as $ep) {
+                    $totalProgressSum += $ep['progress'];
+                }
+                $overallPercent = round($totalProgressSum / $totalEps, 1);
+                
+                $response = [
+                    'is_batch' => true,
+                    'status' => $status,
+                    'progress' => $overallPercent,
+                    'current_episode' => [
+                        'index' => $currentIdx + 1,
+                        'total' => $totalEps,
+                        'label' => $meta['episodes'][$currentIdx]['label'],
+                        'progress' => $percent,
+                        'speed' => $speed ? $speed : 'N/A',
+                        'eta' => $eta ? $eta : 'N/A',
+                        'size' => $totalSize
+                    ]
+                ];
+                if ($status === 'error' && $errorMessage !== null) {
+                    $response['message'] = $errorMessage;
+                }
+                
+                echo json_encode($response);
+                break;
+            }
+        }
+
+        // Lógica de download individual (Retrocompatibilidade intacta)
+        $logPath = $progressDir . DIRECTORY_SEPARATOR . $id . '.log';
+        if (!file_exists($logPath)) {
+            echo json_encode(['status' => 'waiting', 'progress' => 0]);
+            break;
+        }
+
+        $log = file_get_contents($logPath);
+        if (substr($log, 0, 2) === "\xFF\xFE" || strpos($log, "\x00") !== false) {
+            $log = mb_convert_encoding($log, 'UTF-8', 'UTF-16LE');
+        }
+
         $lines = explode("\n", $log);
         $percent = 0;
         $speed = '';
+        $metaId = '';
         $eta = '';
         $totalSize = 'Calculando...';
         $destinationFile = '';
 
-        // Procura pelo nome do arquivo final no log
         foreach ($lines as $line) {
             if (preg_match('/\[download\] Destination: (.*)/', $line, $destMatches)) {
                 $destinationFile = basename(trim($destMatches[1]));
@@ -339,46 +614,34 @@ switch ($action) {
             }
         }
 
-        // Varre de trás para frente para pegar o status mais atual
         for ($i = count($lines) - 1; $i >= 0; $i--) {
             $line = trim($lines[$i]);
             if (empty($line)) continue;
-
-            // Padrão do yt-dlp para download de HLS/dash
-            // Ex: [download]  53.5% of ~   4.33GiB at    3.33MiB/s ETA 10:25
             if (preg_match('/\[download\]\s+([0-9.]+)%\s+of\s+(~?\s*[0-9a-zA-Z.]+)\s+at\s+([0-9a-zA-Z.\/s]+)\s+ETA\s+([0-9a-zA-Z.:]+)/', $line, $m)) {
                 $percent = floatval($m[1]);
                 $totalSize = trim($m[2]);
                 $speed = trim($m[3]);
                 $eta = trim($m[4]);
                 break;
-            }
-            // Padrão simples de percentual
-            elseif (preg_match('/\[download\]\s+([0-9.]+)%\s+of\s+(~?\s*[0-9a-zA-Z.]+)/', $line, $m)) {
+            } elseif (preg_match('/\[download\]\s+([0-9.]+)%\s+of\s+(~?\s*[0-9a-zA-Z.]+)/', $line, $m)) {
                 $percent = floatval($m[1]);
                 $totalSize = trim($m[2]);
                 break;
             }
         }
 
-        // Determina o status final
         $status = 'downloading';
         $errorMessage = null;
         if ($percent >= 100 || stripos($log, '100% of') !== false || stripos($log, 'has already been downloaded') !== false) {
             $status = 'completed';
             $percent = 100;
         } elseif (!$isRunning) {
-            // Se o processo parou de rodar e não atingiu 100%
-
-            // 1. Verifica se houve algum erro real registrado no log
             if (stripos($log, 'ERROR:') !== false) {
                 preg_match('/ERROR:\s*(.*)/i', $log, $errMatches);
                 $errMsg = $errMatches[1] ?? 'Erro desconhecido no yt-dlp.';
                 $status = 'error';
                 $errorMessage = trim($errMsg);
-            }
-            // 2. Checa se o arquivo final foi gerado (em caso do log não ter impresso os 100% finais devido ao merge de fragmentos)
-            elseif ($percent > 0 && !empty($destinationFile) && file_exists($downloadsDir . DIRECTORY_SEPARATOR . $destinationFile)) {
+            } elseif ($percent > 0 && !empty($destinationFile) && file_exists($downloadsDir . DIRECTORY_SEPARATOR . $destinationFile)) {
                 $status = 'completed';
                 $percent = 100;
             } else {
@@ -386,7 +649,6 @@ switch ($action) {
             }
         }
 
-        // Se finalizou com sucesso ou falha, podemos atualizar os metadados
         if (file_exists($metaPath)) {
             $meta = json_decode(file_get_contents($metaPath), true);
             $meta['status'] = $status;
@@ -449,11 +711,16 @@ switch ($action) {
 
     case 'get_config':
         $freeSpace = @disk_free_space($downloadsDir);
+        $totalSpace = @disk_total_space($downloadsDir);
         $freeSpaceText = ($freeSpace !== false) ? formatBytes($freeSpace) : 'Desconhecido';
+        $totalSpaceText = ($totalSpace !== false) ? formatBytes($totalSpace) : 'Desconhecido';
         echo json_encode([
             'downloads_dir' => $downloadsDir,
             'default_dir' => __DIR__ . DIRECTORY_SEPARATOR . 'downloads',
-            'free_space' => $freeSpaceText
+            'free_space' => $freeSpaceText,
+            'total_space' => $totalSpaceText,
+            'free_space_raw' => $freeSpace,
+            'total_space_raw' => $totalSpace
         ]);
         break;
 

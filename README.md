@@ -4,7 +4,10 @@ Uma aplicação web local desenvolvida em PHP, HTML e JavaScript para baixar ví
 
 ## 🚀 Funcionalidades
 
-- **Análise Inteligente de Links:** Extração automática de resoluções, durações e tamanhos estimados a partir de links do OK.ru ou páginas do NetCine.
+- **Análise Inteligente de Links:** Extração automática de resoluções, durações e tamanhos estimados a partir de links de vídeos individuais do OK.ru ou páginas completas de séries (/tvshows/) no NetCinema.
+- **Download de Séries em Lote Sequencial:** Permite analisar uma série inteira, selecionar os episódios desejados por checklist e baixá-los sequencialmente no background através de um script PowerShell dinâmico, com monitoramento do progresso geral e do episódio ativo.
+- **Visual Premium Atualizado (Netflix/Plex Style):** Interface repaginada em Glassmorphism escuro com neon, contendo um dashboard com widgets de estatísticas (total de vídeos na biblioteca, espaço em disco com barra de progresso colorida de alerta e status de conexão do servidor).
+- **Biblioteca Local em Grade (Poster Grid):** Os vídeos baixados são organizados em uma grade de cartazes interativos com gradientes gerados dinamicamente com base nos títulos. Ao passar o mouse, é exibido um overlay com botão Play centralizado e ações rápidas (download local e exclusão).
 - **Resiliência contra Anúncios e Bloqueios:** O extrator de player contorna estruturas complexas de iframes de propaganda e tokens de streaming dinâmicos.
 - **Downloads em Segundo Plano:** Execução autônoma de downloads através do utilitário `yt-dlp` rodando sob PowerShell em segundo plano, monitorado de forma segura via identificador de processo (PID).
 - **Tolerância a Instabilidades de Rede:** O monitoramento de progresso ignora avisos de timeout temporários de conexão, garantindo que o download continue tentando recuperar o sinal no background sem travar a interface do usuário.
@@ -39,11 +42,14 @@ Uma aplicação web local desenvolvida em PHP, HTML e JavaScript para baixar ví
 
 ## 📖 Como Usar
 
-1. **Analisar Link:** Cole a URL do filme/episódio da plataforma suportada na caixa de entrada e clique em **Analisar**. A aplicação buscará as qualidades de vídeo disponíveis.
-2. **Baixar Vídeo:** Escolha a resolução desejada na lista apresentada e clique em **Baixar Vídeo Selecionado**.
-3. **Acompanhar Progresso:** O download iniciará no background e exibirá a porcentagem, velocidade média e tempo restante de forma dinâmica. Você pode fechar ou atualizar a página, pois o download continuará rodando em segundo plano.
-4. **Assistir Online:** Assim que concluído, o filme aparecerá na **Biblioteca Local** na lateral direita. Clique no ícone de Play para assistir diretamente no player do navegador com avanço rápido suave.
-5. **Liberar Espaço:** Caso um download falhe por falta de espaço, acesse o painel de **Configurações** e clique em **Limpar Arquivos Temporários (.part)** para apagar os arquivos parciais residuais.
+1. **Analisar Link:** Cole a URL de um filme ou de uma série na barra de pesquisa superior e clique em **Analisar**. O sistema identificará automaticamente o tipo de conteúdo.
+2. **Configurar o Download:**
+   - **Para Filmes:** Selecione a resolução desejada na lista de formatos extraídos da API.
+   - **Para Séries:** Selecione a qualidade limite desejada (ex: Melhor Qualidade, Full HD, etc.) e marque os episódios que deseja baixar no checklist (por padrão todos vêm marcados).
+3. **Baixar Conteúdo:** Clique no botão **Baixar Conteúdo Selecionado**.
+4. **Acompanhar Progresso:** O download iniciará no background via PowerShell. O card de progresso mostrará o percentual geral do download (no caso de séries, exibe também qual episódio está sendo processado ativamente, o progresso dele, velocidade e ETA). Você pode fechar o navegador que os downloads continuarão rodando de forma resiliente.
+5. **Assistir Online:** Concluído o download, o vídeo é listado instantaneamente na **Biblioteca Local** como um card de poster cinemático. Passe o mouse sobre ele para ver o botão Play e clique para assistir diretamente no player do navegador com avanço rápido suave (HTTP Range 206).
+6. **Gerenciamento e Limpeza:** Use a engrenagem de **Configurações** para redefinir a pasta de destino (o espaço livre será recalculado em tempo real no topo) ou para apagar fragmentos temporários parciais `.part`.
 
 ## 📂 Estrutura de Arquivos
 

@@ -1,0 +1,17 @@
+# Ignora arquivos de progresso temporários e PIDs
+progress/*
+!progress/.gitkeep
+
+# Ignora os vídeos baixados localmente
+downloads/*
+!downloads/.gitkeep
+
+# Ignora configurações locais individuais do servidor
+config.json
+
+# Outros arquivos temporários de sistemas e editores
+.vscode/
+.idea/
+*.tmp
+Thumbs.db
+.DS_Store

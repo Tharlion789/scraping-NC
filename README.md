@@ -21,7 +21,7 @@ Uma aplicação web local desenvolvida em PHP, HTML e JavaScript para baixar ví
    - Apache com suporte a PHP 7.4 ou superior.
    - PHP configurado com a extensão `curl` ativada (padrão no XAMPP).
 2. **Python:**
-   - Python instalado e configurado no sistema. A aplicação usa por padrão o executável no caminho `C:\Users\Tharlion\anaconda3\python.exe` (pode ser ajustado na linha 9 do `api.php`).
+   - Python instalado e configurado no sistema. A aplicação usa por padrão o executável no caminho `C:\Users\seu-user\anaconda3\python.exe` (pode ser ajustado na linha 9 do `api.php`).
 3. **yt-dlp:**
    - Instale o `yt-dlp` através do Python:
      ```bash

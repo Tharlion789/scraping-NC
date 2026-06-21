@@ -471,6 +471,7 @@ switch ($action) {
                 
                 $logPath = $progressDir . '/' . $downloadId . '_' . $index . '.log';
                 $cleanLabel = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $epLabel);
+                $cleanLabel = str_replace(['’', '‘', '`'], "'", $cleanLabel);
                 $cleanLabel = preg_replace('/\s+/', ' ', trim($cleanLabel));
 
                 // Escapa caminhos para uso dentro das strings com aspas simples do PowerShell
@@ -529,6 +530,7 @@ switch ($action) {
         $customTitle = $_POST['title'] ?? '';
         if (!empty($customTitle)) {
             $cleanTitle = preg_replace('/[\\\\\/:\*\?"<>\|]/', '', $customTitle);
+            $cleanTitle = str_replace(['’', '‘', '`'], "'", $cleanTitle);
             $cleanTitle = preg_replace('/\s+/', ' ', trim($cleanTitle));
             $outputFile = $cleanTitle . '.%(ext)s';
         } else {
@@ -624,10 +626,10 @@ switch ($action) {
             }
         }
 
-        // Tolerância de inicialização de 15 segundos para evitar condições de corrida
+        // Tolerância de inicialização de 120 segundos para evitar condições de corrida em lotes gigantescos
         if (!$isRunning && $meta) {
             $startTime = $meta['start_time'] ?? 0;
-            if (time() - $startTime < 15) {
+            if (time() - $startTime < 120) {
                 $isRunning = true;
             }
         }

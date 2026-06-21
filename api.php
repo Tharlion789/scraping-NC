@@ -89,6 +89,18 @@ function extractStream($url) {
         return null;
     }
 
+    // Se a própria página do iframe já tiver o source de vídeo direto, usamos ele!
+    if (preg_match('/<source[^>]+src="([^"]+)"/i', $html, $m)) {
+        $streamUrl = htmlspecialchars_decode($m[1]);
+        $effectiveHlsUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+        curl_close($ch);
+
+        return [
+            'stream_url' => $streamUrl,
+            'referer' => $effectiveHlsUrl
+        ];
+    }
+
     preg_match('/href="([^"]+hls\.php[^"]+)"/i', $html, $m);
     if (empty($m)) {
         preg_match('/href="([^"]*media-player\/hls\/hls\.php[^"]*)"/i', $html, $m);
@@ -472,15 +484,17 @@ switch ($action) {
                 $ps1Content .= "    if (\$scrapeJson) {\n";
                 $ps1Content .= "        \$scrape = \$scrapeJson | ConvertFrom-Json -ErrorAction SilentlyContinue\n";
                 $ps1Content .= "    }\n";
-                $ps1Content .= "    \$urlClean = '" . $escapedEpUrl . "'\n";
-                $ps1Content .= "    \$refererArg = @()\n";
                 $ps1Content .= "    if (\$scrape -and \$scrape.stream_url) {\n";
                 $ps1Content .= "        \$urlClean = \$scrape.stream_url\n";
+                $ps1Content .= "        \$refererArg = @()\n";
                 $ps1Content .= "        if (\$scrape.referer) {\n";
                 $ps1Content .= "            \$refererArg = @('--add-header', ('Referer: ' + \$scrape.referer))\n";
                 $ps1Content .= "        }\n";
-                $ps1Content .= "    }\n";
-                $ps1Content .= "    & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -P 'home:" . str_replace("'", "''", $downloadsDir) . "' -P 'temp:" . str_replace("'", "''", $progressDir) . "' -o '" . $escapedCleanLabel . ".%(ext)s' @refererArg \$urlClean 2>&1 | Out-File -FilePath '" . $escapedLogPath . "' -Encoding utf8\n\n";
+                $ps1Content .= "        & '" . $pythonPathClean . "' -m yt_dlp --ffmpeg-location '" . $ffmpegBin . "' --restrict-filenames --concurrent-fragments 16 --newline -f '" . $formatIdClean . "' -P 'home:" . str_replace("'", "''", $downloadsDir) . "' -P 'temp:" . str_replace("'", "''", $progressDir) . "' -o '" . $escapedCleanLabel . ".%(ext)s' @refererArg \$urlClean 2>&1 | Out-File -FilePath '" . $escapedLogPath . "' -Encoding utf8\n";
+                $ps1Content .= "    } else {\n";
+                $ps1Content .= "        \$errMsg = if (\$scrape -and \$scrape.error) { \$scrape.error } else { 'Failed to extract stream URL (video offline or unsupported)' }\n";
+                $ps1Content .= "        \"ERROR: \$errMsg\" | Out-File -FilePath '" . $escapedLogPath . "' -Encoding utf8\n";
+                $ps1Content .= "    }\n\n";
 
                 $batchMeta['episodes'][] = [
                     'label' => $epLabel,
@@ -522,7 +536,25 @@ switch ($action) {
         }
 
         // Verifica se é uma URL do player netcinema e extrai o streaming/referer
-        $extracted = extractStream($url);
+        $extracted = null;
+        $isNetcinemaUrl = (strpos($url, 'eee1.lat') !== false || strpos($url, 'netcinema.lat') !== false);
+        if ($isNetcinemaUrl) {
+            $extracted = extractStream($url);
+            if (!$extracted) {
+                file_put_contents($logPath, "ERROR: Failed to extract stream URL (video offline or unsupported)");
+                file_put_contents($metaPath, json_encode([
+                    'id' => $downloadId,
+                    'url' => $url,
+                    'format_id' => $formatId,
+                    'start_time' => time(),
+                    'status' => 'error',
+                    'error_message' => 'Failed to extract stream URL (video offline or unsupported)'
+                ]));
+                echo json_encode(['success' => true, 'id' => $downloadId]);
+                break;
+            }
+        }
+
         $refererArg = "";
         if ($extracted) {
             $url = $extracted['stream_url'];
@@ -569,6 +601,17 @@ switch ($action) {
         $metaPath = $progressDir . DIRECTORY_SEPARATOR . $id . '.meta';
         $pidPath = $progressDir . DIRECTORY_SEPARATOR . $id . '.pid';
 
+        $meta = null;
+        if (file_exists($metaPath)) {
+            $meta = json_decode(file_get_contents($metaPath), true);
+        }
+
+        // Se já foi cancelado, retorna status cancelado
+        if ($meta && isset($meta['status']) && $meta['status'] === 'cancelled') {
+            echo json_encode(['status' => 'cancelled']);
+            break;
+        }
+
         // Verifica se o processo principal está ativo via PID
         $isRunning = false;
         if (file_exists($pidPath)) {
@@ -581,10 +624,16 @@ switch ($action) {
             }
         }
 
+        // Tolerância de inicialização de 15 segundos para evitar condições de corrida
+        if (!$isRunning && $meta) {
+            $startTime = $meta['start_time'] ?? 0;
+            if (time() - $startTime < 15) {
+                $isRunning = true;
+            }
+        }
+
         // Se o metadados existir, verificamos se é download em lote
-        if (file_exists($metaPath)) {
-            $meta = json_decode(file_get_contents($metaPath), true);
-            
+        if ($meta) {
             if (!empty($meta['is_batch'])) {
                 $totalEps = $meta['total_episodes'];
                 
@@ -647,15 +696,42 @@ switch ($action) {
                 $meta['episodes'][$currentIdx]['progress'] = $percent;
                 
                 for ($i = 0; $i < $totalEps; $i++) {
+                    $logFileI = $progressDir . DIRECTORY_SEPARATOR . $id . '_' . $i . '.log';
+                    $hasError = false;
+                    if (file_exists($logFileI)) {
+                        $logContent = file_get_contents($logFileI);
+                        if (substr($logContent, 0, 2) === "\xFF\xFE" || strpos($logContent, "\x00") !== false) {
+                            $logContent = mb_convert_encoding($logContent, 'UTF-8', 'UTF-16LE');
+                        }
+                        if (stripos($logContent, 'ERROR:') !== false) {
+                            $hasError = true;
+                        }
+                    }
+                    
                     if ($i < $currentIdx) {
-                        $meta['episodes'][$i]['status'] = 'completed';
-                        $meta['episodes'][$i]['progress'] = 100;
-                    } elseif ($i == $currentIdx) {
-                        if ($percent >= 100 || (!empty($log) && (stripos($log, '100% of') !== false || stripos($log, 'has already been downloaded') !== false))) {
+                        if ($hasError) {
+                            $meta['episodes'][$i]['status'] = 'failed';
+                            $meta['episodes'][$i]['progress'] = 0;
+                        } else {
                             $meta['episodes'][$i]['status'] = 'completed';
                             $meta['episodes'][$i]['progress'] = 100;
+                        }
+                    } elseif ($i == $currentIdx) {
+                        if ($percent >= 100 || (!empty($log) && (stripos($log, '100% of') !== false || stripos($log, 'has already been downloaded') !== false))) {
+                            if ($hasError) {
+                                $meta['episodes'][$i]['status'] = 'failed';
+                                $meta['episodes'][$i]['progress'] = 0;
+                            } else {
+                                $meta['episodes'][$i]['status'] = 'completed';
+                                $meta['episodes'][$i]['progress'] = 100;
+                            }
                         } else {
-                            $meta['episodes'][$i]['status'] = 'downloading';
+                            if ($hasError) {
+                                $meta['episodes'][$i]['status'] = 'failed';
+                                $meta['episodes'][$i]['progress'] = 0;
+                            } else {
+                                $meta['episodes'][$i]['status'] = 'downloading';
+                            }
                         }
                     } else {
                         $meta['episodes'][$i]['status'] = 'pending';
@@ -665,7 +741,6 @@ switch ($action) {
                 
                 // Determina status geral do lote
                 $status = 'downloading';
-                $errorMessage = null;
                 
                 $allCompleted = true;
                 foreach ($meta['episodes'] as $ep) {
@@ -677,24 +752,27 @@ switch ($action) {
                 if ($allCompleted) {
                     $status = 'completed';
                 } elseif (!$isRunning) {
-                    if (!empty($log) && stripos($log, 'ERROR:') !== false) {
-                        preg_match('/ERROR:\s*(.*)/i', $log, $errMatches);
-                        $errMsg = $errMatches[1] ?? 'Erro desconhecido no lote.';
-                        $status = 'error';
-                        $errorMessage = trim($errMsg);
-                        $meta['episodes'][$currentIdx]['status'] = 'failed';
-                    } else {
-                        $status = 'failed';
+                    // O processo PowerShell terminou.
+                    // Se o episódio ativo atual ainda está marcando como 'downloading' ou 'pending', mudamos para falho
+                    if ($meta['episodes'][$currentIdx]['status'] === 'downloading' || $meta['episodes'][$currentIdx]['status'] === 'pending') {
                         $meta['episodes'][$currentIdx]['status'] = 'failed';
                     }
+                    $status = 'completed';
                 }
                 
                 $meta['status'] = $status;
                 file_put_contents($metaPath, json_encode($meta, JSON_PRETTY_PRINT));
                 
                 $totalProgressSum = 0;
+                $succeededCount = 0;
+                $failedCount = 0;
                 foreach ($meta['episodes'] as $ep) {
                     $totalProgressSum += $ep['progress'];
+                    if ($ep['status'] === 'completed') {
+                        $succeededCount++;
+                    } elseif ($ep['status'] === 'failed') {
+                        $failedCount++;
+                    }
                 }
                 $overallPercent = round($totalProgressSum / $totalEps, 1);
                 
@@ -710,11 +788,13 @@ switch ($action) {
                         'speed' => $speed ? $speed : 'N/A',
                         'eta' => $eta ? $eta : 'N/A',
                         'size' => $totalSize
+                    ],
+                    'summary' => [
+                        'succeeded' => $succeededCount,
+                        'failed' => $failedCount,
+                        'total' => $totalEps
                     ]
                 ];
-                if ($status === 'error' && $errorMessage !== null) {
-                    $response['message'] = $errorMessage;
-                }
                 
                 echo json_encode($response);
                 break;

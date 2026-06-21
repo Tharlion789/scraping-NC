@@ -600,12 +600,24 @@
                         clearInterval(progressInterval);
                         alert('O download falhou ou foi abortado.');
                         resetDownloadUI();
+                    } else if (data.status === 'cancelled') {
+                        clearInterval(progressInterval);
+                        alert('O download foi cancelado pelo usuário.');
+                        resetDownloadUI();
                     } else if (data.status === 'completed') {
                         clearInterval(progressInterval);
                         updateProgressBar(100, 'N/A', '00:00', data.size || 'N/A', data.filename || 'Completo');
                         
                         setTimeout(() => {
-                            alert('Download concluído com sucesso!');
+                            if (data.is_batch && data.summary) {
+                                if (data.summary.failed > 0) {
+                                    alert(`Download do lote concluído: ${data.summary.succeeded} episódios baixados com sucesso, ${data.summary.failed} falharam ou ficaram indisponíveis.`);
+                                } else {
+                                    alert(`Download concluído com sucesso! Todos os ${data.summary.total} episódios foram baixados.`);
+                                }
+                            } else {
+                                alert('Download concluído com sucesso!');
+                            }
                             resetDownloadUI();
                             loadLibrary();
                             updateStorageWidget();

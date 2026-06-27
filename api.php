@@ -29,10 +29,31 @@ if (!file_exists($progressDir)) {
     @mkdir($progressDir, 0777, true);
 }
 
+// Função para verificar se a URL pertence a um domínio do NetCinema ou espelho (.lat)
+function isNetcinemaMirror($url) {
+    $parsedHost = parse_url(trim($url), PHP_URL_HOST);
+    if (!$parsedHost) return false;
+    
+    // Normaliza host (remove www.)
+    $host = preg_replace('/^www\./i', '', $parsedHost);
+    
+    // Confirma se pertence a domínios do NetCinema ou espelhos como eee1.lat, qqq1.lat, netcinebw.lat, etc.
+    if (stripos($host, 'netcinema') !== false || 
+        stripos($host, 'netcine') !== false || 
+        preg_match('/^[a-z0-9]+1?\.lat$/i', $host) ||
+        preg_match('/^[a-z0-9]+1?\.xyz$/i', $host)
+    ) {
+        return true;
+    }
+    
+    return false;
+}
+
 // Função para extrair a URL de streaming de players integrados (como eee1.lat e netcinema.lat)
 function extractStream($url) {
-    if (strpos($url, 'eee1.lat') === false && strpos($url, 'netcinema.lat') === false && strpos($url, 'hlsarchive.php') === false && strpos($url, 'hls.php') === false) {
-        return null;
+    $url = trim($url);
+    if (!isNetcinemaMirror($url) && strpos($url, 'hlsarchive.php') === false && strpos($url, 'hls.php') === false) {
+        return ['success' => false, 'error' => 'URL is not a recognized NetCinema mirror or HLS page'];
     }
 
     $urlOriginal = $url;
@@ -42,6 +63,7 @@ function extractStream($url) {
     curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 15);
 
     // Se for o link da página principal do filme, extraímos o iframe
@@ -49,15 +71,17 @@ function extractStream($url) {
     if (!$isPlayerPage) {
         curl_setopt($ch, CURLOPT_URL, $url);
         $html = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         if (empty($html)) {
+            $err = curl_error($ch);
             curl_close($ch);
-            return null;
+            return ['success' => false, 'error' => "Failed to fetch episode page (HTTP $http_code): $err"];
         }
 
-        preg_match_all('/<iframe[^>]+src="([^"]+)"/i', $html, $matches);
+        preg_match_all('/<iframe[^>]+src=["\']?([^"\'\s>]+)["\']?/i', $html, $matches);
         if (empty($matches[1])) {
             curl_close($ch);
-            return null;
+            return ['success' => false, 'error' => 'No iframes found on the episode page (Cloudflare block or page structure changed)'];
         }
 
         $iframeUrl = null;
@@ -76,62 +100,74 @@ function extractStream($url) {
         $url = $iframeUrl;
         if (strpos($url, 'http') !== 0) {
             $parsed = parse_url($urlOriginal);
-            $baseDomain = (isset($parsed['scheme']) ? $parsed['scheme'] : 'https') . '://' . (isset($parsed['host']) ? $parsed['host'] : 'eee1.lat');
-            $url = $baseDomain . '/' . ltrim($url, '/');
+            $scheme = isset($parsed['scheme']) ? $parsed['scheme'] : 'https';
+            if (strpos($url, '//') === 0) {
+                $url = $scheme . ':' . $url;
+            } else {
+                $baseDomain = $scheme . '://' . (isset($parsed['host']) ? $parsed['host'] : 'eee1.lat');
+                $url = $baseDomain . '/' . ltrim($url, '/');
+            }
         }
     }
 
     // Agora acessamos a página do iframe para achar o botão "Assistir Online"
     curl_setopt($ch, CURLOPT_URL, $url);
     $html = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     if (empty($html)) {
+        $err = curl_error($ch);
         curl_close($ch);
-        return null;
+        return ['success' => false, 'error' => "Failed to fetch iframe page (HTTP $http_code): $err"];
     }
 
     // Se a própria página do iframe já tiver o source de vídeo direto, usamos ele!
-    if (preg_match('/<source[^>]+src="([^"]+)"/i', $html, $m)) {
+    if (preg_match('/<source[^>]+src=["\']?([^"\'\s>]+)["\']?/i', $html, $m)) {
         $streamUrl = htmlspecialchars_decode($m[1]);
         $effectiveHlsUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
         curl_close($ch);
 
         return [
+            'success' => true,
             'stream_url' => $streamUrl,
             'referer' => $effectiveHlsUrl
         ];
     }
 
-    preg_match('/href="([^"]+hls\.php[^"]+)"/i', $html, $m);
-    if (empty($m)) {
-        preg_match('/href="([^"]*media-player\/hls\/hls\.php[^"]*)"/i', $html, $m);
-    }
+    preg_match('/href=["\']?([^"\']*(?:hls\.php|media-player\/hls\/hls\.php)[^"\']*)["\']?/i', $html, $m);
 
     if (empty($m)) {
         curl_close($ch);
-        return null;
+        return ['success' => false, 'error' => 'HLS player link not found on the iframe page'];
     }
 
     $hlsUrl = htmlspecialchars_decode($m[1]);
     if (strpos($hlsUrl, 'http') !== 0) {
         $parsed = parse_url($urlOriginal);
-        $baseDomain = (isset($parsed['scheme']) ? $parsed['scheme'] : 'https') . '://' . (isset($parsed['host']) ? $parsed['host'] : 'eee1.lat');
-        $hlsUrl = $baseDomain . '/' . ltrim($hlsUrl, '/');
+        $scheme = isset($parsed['scheme']) ? $parsed['scheme'] : 'https';
+        if (strpos($hlsUrl, '//') === 0) {
+            $hlsUrl = $scheme . ':' . $hlsUrl;
+        } else {
+            $baseDomain = $scheme . '://' . (isset($parsed['host']) ? $parsed['host'] : 'eee1.lat');
+            $hlsUrl = $baseDomain . '/' . ltrim($hlsUrl, '/');
+        }
     }
 
     // Acessa o player de HLS propriamente dito
     curl_setopt($ch, CURLOPT_URL, $hlsUrl);
     curl_setopt($ch, CURLOPT_REFERER, $url);
     $html = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     if (empty($html)) {
+        $err = curl_error($ch);
         curl_close($ch);
-        return null;
+        return ['success' => false, 'error' => "Failed to fetch HLS player page (HTTP $http_code): $err"];
     }
 
     // Extrai o link de streaming da tag <source>
-    preg_match('/<source[^>]+src="([^"]+)"/i', $html, $m);
+    preg_match('/<source[^>]+src=["\']?([^"\'\s>]+)["\']?/i', $html, $m);
     if (empty($m)) {
         curl_close($ch);
-        return null;
+        return ['success' => false, 'error' => 'Video source link not found on the HLS player page'];
     }
 
     $streamUrl = htmlspecialchars_decode($m[1]);
@@ -139,6 +175,7 @@ function extractStream($url) {
     curl_close($ch);
 
     return [
+        'success' => true,
         'stream_url' => $streamUrl,
         'referer' => $effectiveHlsUrl
     ];
@@ -150,7 +187,7 @@ if (php_sapi_name() === 'cli' || (isset($argv) && count($argv) > 0)) {
     if ($cliAction === 'scrape_cli') {
         $epUrl = $argv[2] ?? '';
         $extracted = extractStream($epUrl);
-        echo $extracted ? json_encode($extracted) : json_encode(['error' => 'Failed to extract stream']);
+        echo json_encode($extracted);
         exit;
     }
 }
@@ -282,12 +319,12 @@ switch ($action) {
             $thumbnail = $ogImage[1] ?? '';
 
             // Extrai Episódios usando regex em todo o HTML
-            preg_match_all('/<a[^>]+href="([^"]+episode\/[^"]+)"[^>]*>(.*?)<\/a>/is', $html, $matches, PREG_SET_ORDER);
+            preg_match_all('/<a[^>]+href=["\']?([^"\']*episode\/[^"\']*)["\']?[^>]*>(.*?)<\/a>/is', $html, $matches, PREG_SET_ORDER);
             
             $episodes = [];
             $seenUrls = [];
             foreach ($matches as $match) {
-                $epUrl = htmlspecialchars_decode($match[1]);
+                $epUrl = trim(htmlspecialchars_decode($match[1]));
                 if (in_array($epUrl, $seenUrls)) continue;
                 $seenUrls[] = $epUrl;
                 
@@ -315,7 +352,7 @@ switch ($action) {
         }
 
         $pageTitle = null;
-        if (strpos($url, 'eee1.lat') !== false || strpos($url, 'netcinema.lat') !== false) {
+        if (isNetcinemaMirror($url)) {
             $isPlayerPage = (strpos($url, 'media-player/') !== false || strpos($url, 'hls.php') !== false || strpos($url, 'hlsarchive.php') !== false);
             if (!$isPlayerPage) {
                 $ch = curl_init();
@@ -345,7 +382,7 @@ switch ($action) {
         // Verifica se é uma URL do player netcinema e raspa o stream final
         $extracted = extractStream($url);
         $refererArg = "";
-        if ($extracted) {
+        if ($extracted && isset($extracted['success']) && $extracted['success']) {
             $url = $extracted['stream_url'];
             $refererArg = " --add-header " . escapeshellarg("Referer: " . $extracted['referer']);
         }
@@ -483,9 +520,15 @@ switch ($action) {
                 $ps1Content .= "    \$scrapeJson = & '" . str_replace("'", "''", $phpBin) . "' '" . str_replace("'", "''", $apiScript) . "' scrape_cli '" . $escapedEpUrl . "'\n";
                 $ps1Content .= "    \$scrape = \$null\n";
                 $ps1Content .= "    if (\$scrapeJson) {\n";
-                $ps1Content .= "        \$scrape = \$scrapeJson | ConvertFrom-Json -ErrorAction SilentlyContinue\n";
+                $ps1Content .= "        \$jsonStr = (\$scrapeJson -join \"`n\").Trim()\n";
+                $ps1Content .= "        \$startIdx = \$jsonStr.IndexOf('{')\n";
+                $ps1Content .= "        \$endIdx = \$jsonStr.LastIndexOf('}')\n";
+                $ps1Content .= "        if (\$startIdx -ge 0 -and \$endIdx -gt \$startIdx) {\n";
+                $ps1Content .= "            \$jsonStrClean = \$jsonStr.Substring(\$startIdx, \$endIdx - \$startIdx + 1)\n";
+                $ps1Content .= "            \$scrape = \$jsonStrClean | ConvertFrom-Json -ErrorAction SilentlyContinue\n";
+                $ps1Content .= "        }\n";
                 $ps1Content .= "    }\n";
-                $ps1Content .= "    if (\$scrape -and \$scrape.stream_url) {\n";
+                $ps1Content .= "    if (\$scrape -and \$scrape.success -and \$scrape.stream_url) {\n";
                 $ps1Content .= "        \$urlClean = \$scrape.stream_url\n";
                 $ps1Content .= "        \$refererArg = @()\n";
                 $ps1Content .= "        if (\$scrape.referer) {\n";
@@ -539,18 +582,19 @@ switch ($action) {
 
         // Verifica se é uma URL do player netcinema e extrai o streaming/referer
         $extracted = null;
-        $isNetcinemaUrl = (strpos($url, 'eee1.lat') !== false || strpos($url, 'netcinema.lat') !== false);
+        $isNetcinemaUrl = isNetcinemaMirror($url);
         if ($isNetcinemaUrl) {
             $extracted = extractStream($url);
-            if (!$extracted) {
-                file_put_contents($logPath, "ERROR: Failed to extract stream URL (video offline or unsupported)");
+            if (!$extracted || !$extracted['success']) {
+                $err = $extracted['error'] ?? 'Failed to extract stream URL (video offline or unsupported)';
+                file_put_contents($logPath, "ERROR: " . $err);
                 file_put_contents($metaPath, json_encode([
                     'id' => $downloadId,
                     'url' => $url,
                     'format_id' => $formatId,
                     'start_time' => time(),
                     'status' => 'error',
-                    'error_message' => 'Failed to extract stream URL (video offline or unsupported)'
+                    'error_message' => $err
                 ]));
                 echo json_encode(['success' => true, 'id' => $downloadId]);
                 break;
@@ -558,7 +602,7 @@ switch ($action) {
         }
 
         $refererArg = "";
-        if ($extracted) {
+        if ($extracted && isset($extracted['success']) && $extracted['success']) {
             $url = $extracted['stream_url'];
             $refererArg = " --add-header 'Referer: " . str_replace("'", "", $extracted['referer']) . "'";
         }
